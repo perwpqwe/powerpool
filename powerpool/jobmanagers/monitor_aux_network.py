@@ -154,7 +154,7 @@ class MonitorAuxNetwork(Jobmanager, NodeMonitorMixin):
 
         self.block_stats['last_solve_height'] = aux_data['height'] + 1
         self.block_stats['last_solve_worker'] = "{}.{}".format(address, worker)
-        self.block_stats['last_solve_time'] = datetime.datetime.utcnow()
+        self.block_stats['last_solve_time'] = datetime.datetime.now()
 
     @loop(interval='work_interval')
     def _check_new_jobs(self, signal=False):

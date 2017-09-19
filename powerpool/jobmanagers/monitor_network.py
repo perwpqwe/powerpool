@@ -30,12 +30,13 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
                              job_refresh=15,
                              rpc_ping_int=2,
                              pow_block_hash=False,
+                             push_notify=False,
                              poll=None,
                              currency=REQUIRED,
                              algo=REQUIRED,
                              pool_address='',
                              signal=None,
-                             payout_drk_mn=True,
+                             payout_drk_mn=False,
                              max_blockheight=None)
 
     def __init__(self, config):
@@ -68,13 +69,12 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
                                 prev_hash=None,
                                 transactions=None,
                                 subsidy=None)
+        self.current_accepted_shares = 0
         self.block_stats = dict(accepts=0,
                                 rejects=0,
                                 solves=0,
-                                last_solve_height=None,
-                                last_solve_time=None,
-                                last_solve_worker=None)
-        self.recent_blocks = deque(maxlen=15)
+                                blocks=deque([], 10))
+        # self.recent_blocks = deque(maxlen=15)
 
         # Run the looping height poller if we aren't getting push notifications
         if (not self.config['signal'] and self.config['poll'] is None) or self.config['poll']:
@@ -84,6 +84,7 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
     def status(self):
         """ For display in the http monitor """
         ret = dict(net_state=self.current_net,
+                   current_accepted_shares=self.current_accepted_shares,
                    block_stats=self.block_stats,
                    last_signal=self.last_signal,
                    currency=self.config['currency'],
@@ -136,18 +137,18 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
                 submission_time = time.time() - start
                 self.logger.info(
                     "Recording block submission outcome {} after {}"
-                    .format(success, submission_time))
+                        .format(success, submission_time))
                 if success:
                     self.manager.log_event(
                         "{name}.block_submission_{curr}:{t}|ms"
-                        .format(name=self.manager.config['procname'],
-                                curr=self.config['currency'],
-                                t=submission_time * 1000))
+                            .format(name=self.manager.config['procname'],
+                                    curr=self.config['currency'],
+                                    t=submission_time * 1000))
 
             if success:
                 self.block_stats['accepts'] += 1
-                self.recent_blocks.append(
-                    dict(height=job.block_height, timestamp=int(time.time())))
+                # self.recent_blocks.append(
+                #     dict(height=job.block_height, timestamp=int(time.time())))
             else:
                 self.block_stats['rejects'] += 1
                 self.logger.info("{} BLOCK {}:{} REJECTED"
@@ -174,14 +175,14 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
                 retries += 1
                 res = "failed"
                 try:
-                    res = conn.submitblock(block)
+                    res = conn.getblocktemplate({'mode': 'submit', 'data': block})
                 except (CoinRPCException, socket.error, ValueError) as e:
-                    self.logger.info("Block failed to submit to the server {} with submitblock! {}"
+                    self.logger.info("Block failed to submit to the server {} with getblocktemplate! {}"
                                      .format(conn.name, e))
                     if getattr(e, 'error', {}).get('code', 0) != -8:
                         self.logger.error(getattr(e, 'error'), exc_info=True)
                     try:
-                        res = conn.getblocktemplate({'mode': 'submit', 'data': block})
+                        res = conn.submitblock(block)
                     except (CoinRPCException, socket.error, ValueError) as e:
                         self.logger.error("Block failed to submit to the server {}!"
                                           .format(conn.name), exc_info=True)
@@ -228,10 +229,31 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
                                  job.total_value))
 
         self.block_stats['solves'] += 1
-        self.block_stats['last_solve_hash'] = hash_hex
-        self.block_stats['last_solve_height'] = job.block_height
-        self.block_stats['last_solve_worker'] = "{}.{}".format(address, worker)
-        self.block_stats['last_solve_time'] = datetime.datetime.utcnow()
+        lucky = float(self.current_accepted_shares) / self.current_net.get('difficulty', 1)
+        lucky = '{:.2f}%'.format(lucky * 100)
+        self.current_accepted_shares = 0
+        block_temp = {'last_solve_height': job.block_height, 'last_solve_hash': hash_hex,
+                      'last_solve_time': datetime.datetime.now(),
+                      'last_solve_worker': "{}.{}".format(address, worker),
+                      'lucky': lucky}
+        self.block_stats['blocks'].append(block_temp)
+        if self.config['push_notify']:
+            def push(msg):
+                try:
+                    a_p_i__u_s_e_r = 'x'
+                    a_p_i__t_o_k_e_n = 'x'
+                    payload_send = {'token': a_p_i__t_o_k_e_n, 'user': a_p_i__u_s_e_r, 'message': msg, 'priority': 1}
+                    import requests
+                    requests.post('https://api.pushover.net/1/messages.json', payload_send)
+                    # print r1.content
+                except Exception:
+                    pass
+            msg = "New {} block mined.\nheight: {}\nsubsidy: {}\nworker: {}\nlucky: {}\ndate: {}".format(self.config['currency'], job.block_height, float(job.total_value)/100000000, worker, lucky, datetime.datetime.now())
+            push(msg)
+        # self.block_stats['last_solve_hash'] = hash_hex
+        # self.block_stats['last_solve_height'] = job.block_height
+        # self.block_stats['last_solve_worker'] = "{}.{}".format(address, worker)
+        # self.block_stats['last_solve_time'] = datetime.datetime.now()
 
         if __debug__:
             self.logger.debug("New block hex dump:\n{}".format(block))
@@ -350,37 +372,55 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
         # here we recalculate the current merkle branch and partial
         # coinbases for passing to the mining clients
         coinbase = Transaction()
-        coinbase.version = 2
+        coinbase.version = 1
         # create a coinbase input with encoded height and padding for the
         # extranonces so script length is accurate
+        # /P2SH/
+        # script_sig = "\x06" + "/P2SH/"
+        script_sig = ""
+        signature = self.manager.config['signature']
+        script_sig += chr(len(signature)) + signature
         extranonce_length = (self.manager.config['extranonce_size'] +
                              self.manager.config['extranonce_serv_size'])
+        script_sig += b'\0' * extranonce_length
         coinbase.inputs.append(
             Input.coinbase(self._last_gbt['height'],
                            addtl_push=[mm_data] if mm_data else [],
-                           extra_script_sig=b'\0' * extranonce_length))
+                           extra_script_sig=script_sig))
 
         coinbase_value = self._last_gbt['coinbasevalue']
 
         # Payout Darkcoin masternodes
-        mn_enforcement = self._last_gbt.get('enforce_masternode_payments', True)
-        if (self.config['payout_drk_mn'] is True or mn_enforcement is True) \
-                and self._last_gbt.get('payee', '') != '':
-            # Grab the darkcoin payout amount, default to 20%
-            payout = self._last_gbt.get('payee_amount', coinbase_value / 5)
-            coinbase_value -= payout
-            coinbase.outputs.append(
-                Output.to_address(payout, self._last_gbt['payee']))
-            self.logger.debug(
-                "Created TX output for masternode at ({}:{}). Coinbase value "
-                "reduced to {}".format(self._last_gbt['payee'], payout,
-                                       coinbase_value))
+        mn_enforcement = self._last_gbt.get('masternode_payments_enforced', False)
+        if self.config['payout_drk_mn'] or mn_enforcement:
+            if 'payee' in self._last_gbt.get('masternode', {}):
+                # Grab the darkcoin payout amount, default to 50%
+                masternode = self._last_gbt.get('masternode', {})
+                payout = masternode.get('amount', coinbase_value / 2)
+                coinbase_value -= payout
+                coinbase.outputs.append(
+                    Output.to_address(payout, masternode['payee']))
+                self.logger.debug(
+                    "Created TX output for masternode at ({}:{}). Coinbase value "
+                    "reduced to {}".format(masternode['payee'], payout,
+                                           coinbase_value))
+            elif len(self._last_gbt.get('superblock', [])) > 0:
+                for obj in self._last_gbt['superblock']:
+                    payout = obj['amount']
+                    coinbase_value -= payout
+                    coinbase.outputs.append(
+                        Output.to_address(payout, obj['payee']))
+                    self.logger.debug(
+                        "Created TX output for superblock at ({}:{}). Coinbase value "
+                        "reduced to {}".format(masternode['payee'], payout,
+                                               coinbase_value))
 
         # simple output to the proper address and value
         coinbase.outputs.append(
             Output.to_address(coinbase_value, self.config['pool_address']))
 
         job_id = hexlify(struct.pack(str("I"), self._job_counter))
+
         bt_obj = BlockTemplate.from_gbt(self._last_gbt,
                                         coinbase,
                                         extranonce_length,
@@ -422,12 +462,12 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
             self.logger.info(
                 "{}: New block template with {:,} trans. "
                 "Diff {:,.4f}. Subsidy {:,.2f}. Height {:,}. Merged: {}"
-                .format("FLUSH" if flush else "PUSH",
-                        len(self._last_gbt['transactions']),
-                        bits_to_difficulty(self._last_gbt['bits']),
-                        self._last_gbt['coinbasevalue'] / 100000000.0,
-                        self._last_gbt['height'],
-                        ', '.join(auxdata.keys())))
+                    .format("FLUSH" if flush else "PUSH",
+                            len(self._last_gbt['transactions']),
+                            bits_to_difficulty(self._last_gbt['bits']),
+                            self._last_gbt['coinbasevalue'] / 100000000.0,
+                            self._last_gbt['height'],
+                            ', '.join(auxdata.keys())))
             event += ("{name}.jobmanager.work_push:1|c\n"
                       .format(name=self.manager.config['procname']))
 
@@ -455,10 +495,10 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
                 "{name}.{curr}.subsidy:{subsidy}|g\n"
                 "{name}.{curr}.job_generate:{t}|g\n"
                 "{name}.{curr}.height:{height}|g"
-                .format(name=self.manager.config['procname'],
-                        curr=self.config['currency'],
-                        diff=self.current_net['difficulty'],
-                        subsidy=bt_obj.total_value,
-                        height=bt_obj.block_height - 1,
-                        t=(time.time() - self._last_gbt['update_time']) * 1000))
+                    .format(name=self.manager.config['procname'],
+                            curr=self.config['currency'],
+                            diff=self.current_net['difficulty'],
+                            subsidy=bt_obj.total_value,
+                            height=bt_obj.block_height - 1,
+                            t=(time.time() - self._last_gbt['update_time']) * 1000))
         self.manager.log_event(event)

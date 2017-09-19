@@ -13,16 +13,19 @@ from ..stratum_server import StratumClient
 
 
 class Reporter(Component):
-    """ An abstract base class to document the Reporter interface. """
-    def agent_send(self, address, worker, typ, data, time):
-        """ Called when valid data is recieved from a PPAgent connection. """
-        raise NotImplementedError
 
-    def add_block(self, address, height, total_subsidy, fees,
-                  hex_bits, hash, merged, worker, algo):
+
+    """ An abstract base class to document the Reporter interface. """
+    def agent_send(self, **kwargs):
+        """ Called when valid data is recieved from a PPAgent connection. """
+        pass
+        # raise NotImplementedError
+
+    def add_block(self, **kwargs):
         """ Called when a share is submitted with a hash that is valid for the
         network. """
-        raise NotImplementedError
+        pass
+        # raise NotImplementedError
 
     def log_share(self, client, diff, typ, params, job=None, header_hash=None,
                   header=None, start=None, **kwargs):
@@ -35,8 +38,18 @@ class Reporter(Component):
         #            job=job, header_hash=header_hash, header=hexlify(header))))
 
         if typ == StratumClient.VALID_SHARE:
-            self.logger.debug("Valid share accepted from worker {}.{}!"
-                              .format(client.address, client.worker))
+            try:
+                # diff1 = client.server.jobmanager.config['diff1']
+                diff1 = 0x00000000FFFF0000000000000000000000000000000000000000000000000000
+                # print client.manager.config
+                curr_diff = float(diff1) / header_hash
+            except Exception as e:
+                # print 'Error: {}'.format(str(e))
+                curr_diff = 0.00
+            if curr_diff > client.best['best_share_all_time']:
+                client.best['best_share_all_time'] = curr_diff
+            self.logger.debug("Valid share accepted from worker {}.{}, block_diff: {:.2f}"
+                              .format(client.address, client.worker, curr_diff))
             # Grab the raw coinbase out of the job object before gevent can
             # preempt to another thread and change the value. Very important!
             coinbase_raw = job.coinbase.raw
@@ -52,6 +65,7 @@ class Reporter(Component):
             submission_threads = []
             # valid network hash?
             if header_hash <= job.bits_target:
+                client.best['best_share_current_round'] = 0.00
                 submission_threads.append(spawn(
                     job.found_block,
                     coinbase_raw,
@@ -61,7 +75,9 @@ class Reporter(Component):
                     header,
                     job,
                     start))
-
+            else:
+                if curr_diff > client.best['best_share_current_round']:
+                    client.best['best_share_current_round'] = curr_diff
             # check each aux chain for validity
             for chain_id, data in job.merged_data.iteritems():
                 if header_hash <= data['target']:
@@ -81,6 +97,19 @@ class Reporter(Component):
                 else:
                     self.logger.error("Submission gl {} returned nothing!"
                                       .format(gl))
+        elif typ == StratumClient.STALE_SHARE:
+            self.logger.debug("Stale share received from worker {}.{}."
+                              .format(client.address, client.worker))
+        elif typ == StratumClient.DUP_SHARE:
+            self.logger.debug("Duplicate share received from worker {}.{}."
+                              .format(client.address, client.worker))
+        elif typ == StratumClient.LOW_DIFF_SHARE:
+            self.logger.debug("Low Diff share received from worker {}.{}."
+                              .format(client.address, client.worker))
+        else:
+            self.logger.debug("Unknown share received from worker {}.{}."
+                              .format(client.address, client.worker))
+
 
 
 class StatReporter(Reporter):
@@ -93,15 +122,17 @@ class StatReporter(Reporter):
                     attrs={})
     gl_methods = ['_report_one_min']
 
-    def __init__(self):
+    def __init__(self, config):
+        self._configure(config)
         self._minute_slices = {}
         self._per_address_slices = {}
 
     def log_one_minute(self, address, worker, algo, stamp, typ, amount):
         """ Called to log a minutes worth of shares that have been submitted
         by a unique (address, worker, algo). """
-        raise NotImplementedError("If you're not logging the one minute chunks"
-                                  "don't use the StatReporter!")
+        pass
+        # raise NotImplementedError("If you're not logging the one minute chunks"
+        #                           "don't use the StatReporter!")
 
     def log_share(self, client, diff, typ, params, job=None, header_hash=None,
                   header=None, **kwargs):

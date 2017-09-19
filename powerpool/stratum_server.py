@@ -61,8 +61,10 @@ class StratumServer(Component, StreamServer):
                     vardiff=dict(enabled=False,
                                  spm_target=20,
                                  interval=30,
-                                 tiers=[8, 16, 32, 64, 96, 128, 192, 256, 512]),
-                    minimum_manual_diff=64,
+                                 tiers=None,
+                                 minimum_difficulty=16,
+                                 maximum_difficulty=8388608),
+                    minimum_manual_diff=1,
                     push_job_interval=30,
                     idle_worker_disconnect_threshold=3600,
                     agent=dict(enabled=False,
@@ -119,6 +121,34 @@ class StratumServer(Component, StreamServer):
         self.listener = (self.config['address'],
                          self.config['port'] + self.manager.config['server_number'])
         StreamServer.__init__(self, self.listener, spawn=Pool())
+        # Interpolate a list of tiers based on minimum and maximum difficulty
+        # as long as they haven't manually specified tiers. This allows
+        # graceful backwards compatability as well
+        min_diff = self.config['vardiff']['minimum_difficulty']
+        max_diff = self.config['vardiff']['maximum_difficulty']
+        if (self.config['vardiff']['enabled'] and
+                    self.config['vardiff']['tiers'] == None and
+                min_diff and
+                max_diff):
+            tiers = [min_diff]
+            diff = min_diff
+            while diff < max_diff:
+                diff *= 2
+                tiers.append(diff)
+            if tiers[-1] != max_diff:  # don't add a duplicate tier
+                tiers.append(max_diff)
+            self.config['vardiff']['tiers'] = tiers
+            if __debug__:
+                self.logger.debug(
+                    "Interpolated {} tiers from minimum_difficulty of {} and maximum_difficulty of {}"
+                        .format(tiers, min_diff, max_diff))
+
+        # Check to make sure we have tiers to work with, either manually
+        # defined or interpolated
+        if not self.config['vardiff']['tiers']:
+            raise ConfigurationError(
+                "No tiers for vardiff. Please specify vaild minimum_difficulty and "
+                "maximum_difficulty, or a tiers array in the vardiff config block")
 
         self.algo = self.manager.algos[self.config['algo']]
         if not self.config['reporter'] and len(self.manager.component_types['Reporter']) == 1:
@@ -197,7 +227,7 @@ class StratumServer(Component, StreamServer):
                     client._push(job, flush=flush, block=False)
             self.logger.info(
                 "New job enqueued for transmission to {} users in {}"
-                .format(len(self.clients), time_format(time.time() - t)))
+                    .format(len(self.clients), time_format(time.time() - t)))
 
             if flush:
                 self.last_flush_job = job
@@ -329,7 +359,8 @@ class StratumClient(GenericClient):
         self.logger = logger
         self.sock = sock
         self.address = address
-
+        self.counter = {'accepted': 0, 'stale': 0, 'duplicate': 0, 'LowDiff': 0}
+        self.best = {'best_share_current_round': 0.00, 'best_share_all_time': 0.00}
         # Linux specific keepalive settings. OSX & Windows use system vals
         if hasattr(socket, "TCP_KEEPIDLE") and hasattr(socket, "TCP_KEEPINTVL") \
                 and hasattr(socket, "TCP_KEEPCNT"):
@@ -340,6 +371,10 @@ class StratumClient(GenericClient):
             # Failed keepalive probles before declaring other end dead
             sock.setsockopt(socket.SOL_TCP, socket.TCP_KEEPCNT, 5)
 
+        # A local vardiff toggle. We don't want to touch the global. A bit sloppy
+        self.vardiff_enabled = self.config['vardiff']['enabled']
+        # Make a copy of this since we might modify it with command line args
+        self.vardiff_tiers = list(self.config['vardiff']['tiers'])
         self.authenticated = False
         self.subscribed = False
         # flags for current connection state
@@ -436,7 +471,7 @@ class StratumClient(GenericClient):
         if self.next_diff != self.difficulty:
             self.logger.info(
                 "Pushing diff update {} -> {} before job for {}.{}"
-                .format(self.difficulty, self.next_diff, self.address, self.worker))
+                    .format(self.difficulty, self.next_diff, self.address, self.worker))
             self.difficulty = self.next_diff
             self.push_difficulty()
 
@@ -476,7 +511,7 @@ class StratumClient(GenericClient):
                 "Recieved work submit:\n\tworker_name: {0}\n\t"
                 "job_id: {1}\n\textranonce2: {2}\n\t"
                 "ntime: {3}\n\tnonce: {4} ({int_nonce})"
-                .format(
+                    .format(
                     *params,
                     int_nonce=struct.unpack(str("<L"), unhexlify(params[4]))))
 
@@ -501,6 +536,7 @@ class StratumClient(GenericClient):
 
         if job not in self.server.active_jobs:
             self.send_error(self.STALE_SHARE_ERR, id_val=data['id'])
+            self.counter['stale'] += 1
             self.reporter.log_share(client=self,
                                     diff=self.difficulty,
                                     typ=self.STALE_SHARE,
@@ -524,6 +560,7 @@ class StratumClient(GenericClient):
             self.logger.info("Duplicate share rejected from worker {}.{}!"
                              .format(self.address, self.worker))
             self.send_error(self.DUP_SHARE_ERR, id_val=data['id'])
+            self.counter['duplicate'] += 1
             self.reporter.log_share(client=self,
                                     diff=difficulty,
                                     typ=self.DUP_SHARE,
@@ -538,6 +575,7 @@ class StratumClient(GenericClient):
             self.logger.info("Low diff share rejected from worker {}.{}!"
                              .format(self.address, self.worker))
             self.send_error(self.LOW_DIFF_ERR, id_val=data['id'])
+            self.counter['LowDiff'] += 1
             self.reporter.log_share(client=self,
                                     diff=difficulty,
                                     typ=self.LOW_DIFF_SHARE,
@@ -550,7 +588,10 @@ class StratumClient(GenericClient):
         self.send_success(id_val=data['id'])
         # Add the share to the accepted set to check for dups
         job.acc_shares.add(share_lower)
-        self.accepted_shares += difficulty
+        self.counter['accepted'] += 1
+        multi = float(job.diff1) / 0x00000000FFFF0000000000000000000000000000000000000000000000000000
+        self.accepted_shares += difficulty / multi
+        self.server.jobmanager.current_accepted_shares += difficulty / multi
         self.reporter.log_share(client=self,
                                 diff=difficulty,
                                 typ=self.VALID_SHARE,
@@ -571,13 +612,14 @@ class StratumClient(GenericClient):
             self.logger.debug("VARDIFF: Calculated client {} ideal diff {}"
                               .format(self._id, ideal_diff))
         # find the closest tier for them
-        new_diff = min(self.config['vardiff']['tiers'], key=lambda x: abs(x - ideal_diff))
+        # new_diff = min(self.config['vardiff']['tiers'], key=lambda x: abs(x - ideal_diff))
+        new_diff = min(self.vardiff_tiers, key=lambda x: abs(x - ideal_diff))
         self.last_diff_adj = time.time()
 
         if new_diff != self.difficulty:
             self.logger.info(
                 "VARDIFF: Moving to D{} from D{} on {}.{}"
-                .format(new_diff, self.difficulty, self.address, self.worker))
+                    .format(new_diff, self.difficulty, self.address, self.worker))
             self.next_diff = new_diff
             self.push_job(timeout=True)
             return True
@@ -586,7 +628,7 @@ class StratumClient(GenericClient):
                               "close enough")
         return False
 
-    @loop(fin='stop', exit_exceptions=(socket.error, ))
+    @loop(fin='stop', exit_exceptions=(socket.error,))
     def read(self):
         # designed to time out approximately "push_job_interval" after the user
         # last recieved a job. Some miners will consider the mining server dead
@@ -613,15 +655,15 @@ class StratumClient(GenericClient):
             # push a new job if
             if (self.authenticated is True and  # don't send to non-authed
                 # force send if we need to push a new difficulty
-                (self.next_diff != self.difficulty or
-                    # send if we're past the push interval
-                    t > (self.last_job_push +
-                         self.config['push_job_interval'] -
-                         self.time_seed))):
+                    (self.next_diff != self.difficulty or
+                     # send if we're past the push interval
+                             t > (self.last_job_push +
+                                      self.config['push_job_interval'] -
+                                      self.time_seed))):
 
                 # Since they might not be submitting jobs due to low hashrate,
                 # check vardiff on timeout in addition to on mining submit
-                if self.config['vardiff']['enabled'] is True:
+                if self.vardiff_enabled is True:
                     # If recalc didn't need to adjust then we need to push
                     # because we're timed out
                     if not self.recalc_vardiff():
@@ -642,9 +684,9 @@ class StratumClient(GenericClient):
         try:
             data = json.loads(line)
         except ValueError:
-            self.logger.warn("Data {}.. not JSON".format(line[:15]))
+            # self.logger.warn("Data {}.. not JSON".format(line[:15]))
             self.send_error()
-            self._incr('unk_err')
+            # self._incr('unk_err')
             return
 
         # handle malformed data
@@ -717,6 +759,7 @@ class StratumClient(GenericClient):
                         diff = max(self.config['minimum_manual_diff'], args.diff)
                         self.difficulty = diff
                         self.next_diff = diff
+                        self.vardiff_enabled = False
             except IndexError:
                 password = ""
                 username = ""
@@ -759,15 +802,17 @@ class StratumClient(GenericClient):
                 "{name}.{type}:1|c\n"
                 "{name}.{type}_n1:{diff}|c\n"
                 "{name}.submit_time:{t}|ms"
-                .format(name=self.manager.config['procname'], type=key,
-                        diff=diff, t=(time.time() - t) * 1000))
+                    .format(name=self.manager.config['procname'], type=key,
+                            diff=diff, t=(time.time() - t) * 1000))
 
             # don't recalc their diff more often than interval
-            if (self.config['vardiff']['enabled'] is True and
-                    (t - self.last_diff_adj) > self.config['vardiff']['interval']):
+            if (self.vardiff_enabled is True and
+                        (t - self.last_diff_adj) > self.config['vardiff']['interval']):
                 self.recalc_vardiff()
 
         elif meth == "mining.get_transactions":
+            self.send_error(id_val=data['id'])
+        elif meth == "mining.multi_version":
             self.send_error(id_val=data['id'])
         elif meth == "mining.extranonce.subscribe":
             self.send_success(id_val=data['id'])
@@ -785,13 +830,15 @@ class StratumClient(GenericClient):
 
     @property
     def last_share_submit_delta(self):
-        return datetime.datetime.utcnow() - datetime.datetime.utcfromtimestamp(self.last_share_submit)
+        return datetime.datetime.now() - datetime.datetime.fromtimestamp(self.last_share_submit)
 
     @property
     def details(self):
         """ Displayed on the single client view in the http status monitor """
         return dict(alltime_accepted_shares=self.accepted_shares,
                     difficulty=self.difficulty,
+                    counter=self.counter,
+                    best=self.best,
                     type=self.client_type,
                     worker=self.worker,
                     id=self._id,

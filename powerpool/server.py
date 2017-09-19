@@ -14,7 +14,7 @@ class GenericClient(object):
         # use it. Otherwise use the pool address
         bits = username.split('.', 1)
         username = bits[0].strip()
-        worker = ''
+        worker = '0'
         if len(bits) > 1:
             parsed_w = re.sub(r'[^a-zA-Z0-9\[\]_]+', '-', str(bits[1]))
             self.logger.debug("Registering worker name {}".format(parsed_w))
@@ -40,8 +40,9 @@ class GenericClient(object):
                 address = self.config['aliases'][filtered]
                 self.logger.debug("Setting address alias to {}".format(address))
             else:
-                address = self.config['donate_key']
-                self.logger.debug("Falling back to donate key {}".format(address))
+                # address = self.config['donate_key']
+                address = self.server.jobmanager.config['pool_address']
+                self.logger.debug("Falling back to pool_address {}".format(address))
         return address, worker
 
     def start(self):
@@ -86,11 +87,11 @@ class GenericClient(object):
 
     @property
     def connection_duration(self):
-        return datetime.datetime.utcnow() - self.connection_time_dt
+        return datetime.datetime.now() - self.connection_time_dt
 
     @property
     def connection_time_dt(self):
-        return datetime.datetime.utcfromtimestamp(self.connection_time)
+        return datetime.datetime.fromtimestamp(self.connection_time)
 
     @loop(fin='stop', exit_exceptions=(socket.error, ))
     def write(self):

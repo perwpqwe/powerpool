@@ -50,7 +50,7 @@ of a new block.
 
 .. code-block:: bash
 
-    blocknotify=/usr/bin/alertblock /home/USER/coinserver_push/vertcoin.push
+    blocknotify=/usr/bin/alertblock /home/ubuntu/soft/powerpool/GAME.push
 
 You'll want something similar to this in each coinserver's config. Make sure to
 restart it after.

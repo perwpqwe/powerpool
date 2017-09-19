@@ -406,7 +406,7 @@ SWITCH:
         - LTC
         - MEC
         - WDC
-    log_level: DEBUG
+    q
 
 
 ################################################
@@ -596,7 +596,7 @@ redis_ps_scrypt:
     #port: 3855
 
     # Whether or not to sort + pretty print the JSON output.
-    #JSON_SORT_KEYS: False
+    #`: False
     #JSONIFY_PRETTYPRINT_REGULAR: False
 
     # Use DEBUG output

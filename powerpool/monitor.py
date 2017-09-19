@@ -86,12 +86,12 @@ class ServerMonitor(Component, WSGIServer):
         app.wsgi_app = ReverseProxied(app.wsgi_app)
         app.config.update(self.config)
         app.add_url_rule('/', 'general', self.general)
-        app.add_url_rule('/debug/', 'debug', self.debug)
+        # app.add_url_rule('/debug/', 'debug', self.debug)
         app.add_url_rule('/counters/', 'counters', self.counters)
         app.add_url_rule('/<comp_key>/clients/', 'clients_comp', self.clients_comp)
         app.add_url_rule('/<comp_key>/client/<username>', 'client', self.client)
         app.add_url_rule('/<comp_key>/', 'comp', self.comp)
-        app.add_url_rule('/<comp_key>/config', 'comp_config', self.comp_config)
+        # app.add_url_rule('/<comp_key>/config', 'comp_config', self.comp_config)
         # Legacy
         app.add_url_rule('/05/clients/', 'clients', self.clients_0_5)
         app.add_url_rule('/05/', 'general_0_5', self.general_0_5)
@@ -132,8 +132,8 @@ class ServerMonitor(Component, WSGIServer):
             dict_key = "{}_{}".format(comp.__class__.__name__, key)
             try:
                 data[dict_key] = comp.status
-                data[dict_key]['config_view'] = url_for(
-                    'comp_config', comp_key=key, _external=True)
+                # data[dict_key]['config_view'] = url_for(
+                #     'comp_config', comp_key=key, _external=True)
                 if isinstance(comp, StratumServer):
                     data[dict_key]['clients'] = url_for(
                         'clients_comp', comp_key=key, _external=True)
@@ -141,8 +141,8 @@ class ServerMonitor(Component, WSGIServer):
                 err = "Component {} status call raised {}".format(key, e)
                 data[dict_key] = err
                 self.logger.error(err, exc_info=True)
-        data['debug_view'] = url_for('debug', _external=True)
-        data['counter_view'] = url_for('counters', _external=True)
+        # data['debug_view'] = url_for('debug', _external=True)
+        # data['counter_view'] = url_for('counters', _external=True)
         return jsonify(jsonize(data))
 
     def client(self, comp_key, username):

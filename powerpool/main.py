@@ -59,6 +59,7 @@ class PowerPool(Component, DatagramServer):
                     term_timeout=10,
                     extranonce_serv_size=4,
                     extranonce_size=4,
+                    signature='/Stay Hungry, Stay Foolish./',
                     default_component_log_level='INFO',
                     loggers=[{'type': 'StreamHandler', 'level': 'NOTSET'}],
                     events=dict(enabled=False, port=8125, host="127.0.0.1"),
@@ -159,7 +160,7 @@ class PowerPool(Component, DatagramServer):
                 self.logger.info("Unable to fetch git hash info: {}".format(e))
 
         self.algos = {}
-        self.server_start = datetime.datetime.utcnow()
+        self.server_start = datetime.datetime.now()
         self.logger.info("=" * 80)
         self.logger.info("PowerPool stratum server ({}) starting up..."
                          .format(self.config['procname']))
@@ -185,9 +186,9 @@ class PowerPool(Component, DatagramServer):
                 self.logger.info("Enabling {} hashing algorithm from module {}"
                                  .format(name, mod))
 
-        self.event_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.events_enabled = self.config['events']['enabled']
         if self.events_enabled:
+            self.event_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.logger.info("Transmitting statsd formatted stats to {}:{}".format(
                 self.config['events']['host'], self.config['events']['port']))
         self.events_address = (self.config['events']['host'].encode('utf8'),
@@ -206,6 +207,7 @@ class PowerPool(Component, DatagramServer):
             DatagramServer.__init__(self, listener, spawn=None)
 
     def handle(self, data, address):
+        data = data.strip()
         self.logger.info("Recieved new command {}".format(data))
         parts = data.split(" ")
         try:
@@ -256,7 +258,7 @@ class PowerPool(Component, DatagramServer):
         # for exit signals
         ######
         # Register shutdown signals
-        gevent.signal(signal.SIGUSR1, self.dump_objgraph)
+        # gevent.signal(signal.SIGUSR1, self.dump_objgraph)
         gevent.signal(signal.SIGHUP, exit, "SIGHUP")
         gevent.signal(signal.SIGINT, exit, "SIGINT")
         gevent.signal(signal.SIGTERM, exit, "SIGTERM")
@@ -281,15 +283,15 @@ class PowerPool(Component, DatagramServer):
             self.logger.info("Exit")
             self.logger.info("=" * 80)
 
-    def dump_objgraph(self):
-        """ This is a debugging method designed to be called from the datagram
-        port. It helps us debug a memory 'leak' """
-        import gc
-        gc.collect()
-        import objgraph
-        print "Dumping object growth ****"
-        objgraph.show_growth(limit=100)
-        print "****"
+    # def dump_objgraph(self):
+    #     """ This is a debugging method designed to be called from the datagram
+    #     port. It helps us debug a memory 'leak' """
+    #     import gc
+    #     gc.collect()
+    #     import objgraph
+    #     print "Dumping object growth ****"
+    #     objgraph.show_growth(limit=100)
+    #     print "****"
 
     def exit(self, signal=None):
         """ Handle an exit request """
@@ -300,7 +302,7 @@ class PowerPool(Component, DatagramServer):
     @property
     def status(self):
         """ For display in the http monitor """
-        return dict(uptime=str(datetime.datetime.utcnow() - self.server_start),
+        return dict(uptime=str(datetime.datetime.now() - self.server_start),
                     server_start=str(self.server_start),
                     version=dict(
                         version=self.version,
